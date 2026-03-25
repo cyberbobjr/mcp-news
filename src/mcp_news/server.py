@@ -849,6 +849,9 @@ def main():
     if _verbose:
         logging.basicConfig(level=logging.DEBUG)
         logger.info("news_feed: verbose mode enabled, logs will be written to %s", _LOG_DIR)
+    else:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
     sys.argv = [sys.argv[0], *remaining]
     mcp.run()
 
