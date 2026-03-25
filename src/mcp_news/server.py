@@ -52,6 +52,8 @@ _CACHE_DIR = _DATA_DIR / "cache"
 _CACHE_FILE = _CACHE_DIR / "news_feeds_registry.json"
 _CACHE_META_FILE = _CACHE_DIR / "news_feeds_registry.meta.json"
 _CACHE_TTL_SECONDS = 24 * 60 * 60  # 24 hours
+_HEALTH_FILE = _DATA_DIR / "feed_health.json"
+_CONSECUTIVE_ERRORS_THRESHOLD = 10
 
 # In-memory cache (avoids re-reading the file on every call within a session)
 _verbose: bool = False
@@ -59,6 +61,9 @@ _verbose: bool = False
 _memory_cache: Optional[Dict[str, List[Dict[str, str]]]] = None
 _memory_cache_ts: float = 0.0
 _memory_cache_remote_sha: Optional[str] = None
+
+# Full articles from the last news_feed() call, keyed by URL
+_last_articles: Dict[str, Dict[str, Any]] = {}
 
 
 def invalidate_cache() -> None:
@@ -212,6 +217,65 @@ def _read_cache_meta() -> Optional[Dict[str, Any]]:
     except Exception as exc:
         logger.debug("news_feed: cache meta read error: %s", exc)
         return None
+
+
+def _read_health() -> Dict[str, Any]:
+    try:
+        with open(_HEALTH_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_health(data: Dict[str, Any]) -> None:
+    try:
+        _DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_HEALTH_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception as exc:
+        logger.debug("news_feed: health write error: %s", exc)
+
+
+def _update_health(feed_results: List[Dict[str, Any]]) -> None:
+    """Update per-feed health stats from the latest fetch results."""
+    health = _read_health()
+    now = datetime.now(timezone.utc).isoformat()
+    for result in feed_results:
+        url = result.get("url", "")
+        if not url:
+            continue
+        entry = health.get(url, {
+            "source_name": "",
+            "country": "",
+            "success_count": 0,
+            "error_count": 0,
+            "consecutive_errors": 0,
+            "last_success_at": None,
+            "last_error_at": None,
+            "last_error": None,
+        })
+        entry["source_name"] = result.get("source", entry.get("source_name", ""))
+        entry["country"] = result.get("country", entry.get("country", ""))
+        if result.get("error"):
+            entry["error_count"] = entry.get("error_count", 0) + 1
+            entry["consecutive_errors"] = entry.get("consecutive_errors", 0) + 1
+            entry["last_error_at"] = now
+            entry["last_error"] = result["error"]
+        else:
+            entry["success_count"] = entry.get("success_count", 0) + 1
+            entry["consecutive_errors"] = 0
+            entry["last_success_at"] = now
+        health[url] = entry
+    _write_health(health)
+
+
+def _is_feed_dead(url: str, health: Dict[str, Any]) -> bool:
+    """Return True if a feed has hit the consecutive error threshold."""
+    entry = health.get(url)
+    if entry is None:
+        return False
+    return entry.get("consecutive_errors", 0) >= _CONSECUTIVE_ERRORS_THRESHOLD
 
 
 async def _fetch_registry_json() -> tuple[Dict[str, Any], str]:
@@ -436,6 +500,8 @@ async def _fetch_all_feeds(
     sources_map: Dict[str, List[Dict[str, str]]],
 ) -> List[Dict[str, Any]]:
     sem = asyncio.Semaphore(_MAX_CONCURRENCY)
+    health = _read_health()
+    skipped = 0
 
     async def bounded(client: httpx.AsyncClient, source: Dict[str, str], country: str):
         async with sem:
@@ -445,11 +511,16 @@ async def _fetch_all_feeds(
         timeout=_DEFAULT_TIMEOUT,
         headers={"User-Agent": "MCPNewsFeed/1.0"},
     ) as client:
-        tasks = [
-            bounded(client, source, country)
-            for country in countries
-            for source in sources_map.get(country, [])
-        ]
+        tasks = []
+        for country in countries:
+            for source in sources_map.get(country, []):
+                url = source.get("url", "")
+                if _is_feed_dead(url, health):
+                    skipped += 1
+                    logger.debug("news_feed: skipping dead feed %s (%d consecutive errors)",
+                                 url, health[url].get("consecutive_errors", 0))
+                    continue
+                tasks.append(bounded(client, source, country))
         if not tasks:
             return []
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -462,6 +533,8 @@ async def _fetch_all_feeds(
                 })
             else:
                 clean.append(r)  # type: ignore[arg-type]
+        if skipped:
+            logger.info("news_feed: skipped %d dead feeds", skipped)
         return clean
 
 
@@ -607,6 +680,7 @@ async def news_feed(
         unresolved = []
 
     feed_results = await _fetch_all_feeds(resolved, sources_map)
+    _update_health(feed_results)
 
     all_articles: List[Dict[str, Any]] = []
     fetch_errors: List[str] = []
@@ -633,6 +707,13 @@ async def news_feed(
 
     truncated = len(all_articles) > limit
     all_articles = all_articles[:limit]
+
+    # Store full articles before truncation for news_fetch_article lookups
+    _last_articles.clear()
+    for a in all_articles:
+        url = a.get("url")
+        if url:
+            _last_articles[url] = a.copy()
 
     payload = {
         "success": True,
@@ -689,6 +770,74 @@ async def news_feed_invalidate_cache() -> str:
     """
     invalidate_cache()
     return json.dumps({"success": True, "message": "Cache invalidated."})
+
+
+@mcp.tool()
+async def news_fetch_article(url: str) -> str:
+    """Get the full description of a specific article from the last news_feed results.
+
+    Use this after calling news_feed when you need the complete, untruncated
+    description of a specific article.
+
+    Args:
+        url: The article URL as returned by news_feed.
+    """
+    article = _last_articles.get(url)
+    if article is None:
+        return json.dumps({
+            "success": False,
+            "error": f"Article not found. Call news_feed first, then use a URL from its results.",
+        }, ensure_ascii=False)
+    return json.dumps({
+        "success": True,
+        "article": article,
+    }, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def news_feed_health(country: Optional[str] = None) -> str:
+    """Show health stats for RSS feeds: error rates, dead feeds, and reliability.
+
+    Use this to diagnose feed issues or check which sources are unreliable.
+    Feeds with 10+ consecutive errors are automatically skipped during collection.
+
+    Args:
+        country: Filter by country name (e.g. 'France'). If omitted, returns all feeds.
+    """
+    health = _read_health()
+    if not health:
+        return json.dumps({
+            "success": True,
+            "message": "No health data yet. Call news_feed first to start tracking.",
+            "feeds": {},
+        }, ensure_ascii=False)
+
+    if country:
+        resolved = _resolve_country_code(country)
+        country_name = _ISO3_TO_NAME.get(resolved, country) if resolved else country
+        health = {
+            url: entry for url, entry in health.items()
+            if entry.get("country", "").lower() == country_name.lower()
+        }
+
+    dead = {url: e for url, e in health.items()
+            if e.get("consecutive_errors", 0) >= _CONSECUTIVE_ERRORS_THRESHOLD}
+    unhealthy = {url: e for url, e in health.items()
+                 if 0 < e.get("consecutive_errors", 0) < _CONSECUTIVE_ERRORS_THRESHOLD}
+    healthy = {url: e for url, e in health.items()
+               if e.get("consecutive_errors", 0) == 0}
+
+    return json.dumps({
+        "success": True,
+        "summary": {
+            "total_tracked": len(health),
+            "healthy": len(healthy),
+            "unhealthy": len(unhealthy),
+            "dead": len(dead),
+        },
+        "dead_feeds": dead,
+        "unhealthy_feeds": unhealthy,
+    }, ensure_ascii=False, indent=2)
 
 
 def main():
