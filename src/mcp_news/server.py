@@ -11,12 +11,14 @@ Classification, summarization, translation, and formatting are the agent's job.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import hashlib
 import json
 import logging
 import os
 import re
+import sys
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
@@ -44,12 +46,16 @@ _DEFAULT_FEEDS_JSON_URL = (
 def _feeds_json_url() -> str:
     return os.environ.get("NEWS_FEEDS_JSON_URL", "").strip() or _DEFAULT_FEEDS_JSON_URL
 
-_CACHE_DIR = Path(__file__).resolve().parent / ".cache"
+_DATA_DIR = Path(os.environ.get("MCP_NEWS_DATA_DIR", "").strip() or Path.home() / ".mcp-news")
+_LOG_DIR = _DATA_DIR / "logs"
+_CACHE_DIR = _DATA_DIR / "cache"
 _CACHE_FILE = _CACHE_DIR / "news_feeds_registry.json"
 _CACHE_META_FILE = _CACHE_DIR / "news_feeds_registry.meta.json"
 _CACHE_TTL_SECONDS = 24 * 60 * 60  # 24 hours
 
 # In-memory cache (avoids re-reading the file on every call within a session)
+_verbose: bool = False
+
 _memory_cache: Optional[Dict[str, List[Dict[str, str]]]] = None
 _memory_cache_ts: float = 0.0
 _memory_cache_remote_sha: Optional[str] = None
@@ -352,7 +358,6 @@ def _parse_rss_xml(xml_bytes: bytes, source_meta: Dict[str, str]) -> List[Dict[s
         items = root.findall(".//entry")
 
     source_name = source_meta.get("name", "")
-    source_url = source_meta.get("url", "")
     country = source_meta.get("country", "")
 
     for item in items:
@@ -383,7 +388,6 @@ def _parse_rss_xml(xml_bytes: bytes, source_meta: Dict[str, str]) -> List[Dict[s
             "description": _clean_html_tags(description or ""),
             "published_at": pub_date.isoformat() if pub_date else None,
             "source_name": source_name,
-            "source_url": source_url,
             "country": country,
         })
 
@@ -504,11 +508,59 @@ def _deduplicate(articles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def _write_verbose_log(payload: Dict[str, Any]) -> None:
+    """Write fetched articles to a timestamped JSON file in the log directory."""
+    try:
+        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        countries = "_".join(payload.get("countries_requested", ["all"])[:5])
+        log_file = _LOG_DIR / f"news_{countries}_{ts}.json"
+        with open(log_file, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        logger.info("news_feed: verbose log written to %s", log_file)
+    except Exception as exc:
+        logger.warning("news_feed: failed to write verbose log: %s", exc)
+
+
+_MAX_RESPONSE_CHARS = 40_000
+
+
+def _truncate_to_fit(payload: Dict[str, Any], max_chars: int = _MAX_RESPONSE_CHARS) -> str:
+    """Serialize payload to JSON, shrinking it progressively if it exceeds max_chars.
+
+    Strategy: first truncate descriptions, then drop articles from the tail.
+    """
+    articles = payload.get("articles", [])
+
+    # Try full payload first
+    result = json.dumps(payload, ensure_ascii=False, indent=2)
+    if len(result) <= max_chars:
+        return result
+
+    # Step 1: progressively shorten descriptions
+    for max_desc in (300, 150, 50, 0):
+        for a in articles:
+            if len(a.get("description", "")) > max_desc:
+                a["description"] = a["description"][:max_desc] + ("…" if max_desc > 0 else "")
+        result = json.dumps(payload, ensure_ascii=False, indent=2)
+        if len(result) <= max_chars:
+            return result
+
+    # Step 2: drop articles from the end until it fits
+    while articles and len(result) > max_chars:
+        articles.pop()
+        payload["metadata"]["truncated"] = True
+        payload["metadata"]["articles_found"] = len(articles)
+        result = json.dumps(payload, ensure_ascii=False, indent=2)
+
+    return result
+
+
 @mcp.tool()
 async def news_feed(
     countries: Optional[list[str]] = None,
     hours: int = 24,
-    limit: int = 200,
+    limit: int = 50,
 ) -> str:
     """Fetch recent articles from curated news sources (1100+ RSS feeds across 150+ countries).
 
@@ -522,7 +574,7 @@ async def news_feed(
             Examples: ['France', 'USA', 'CHN'], ['FRA', 'GBR'].
         hours: Time window in hours (1-72). Only articles published within this
             window are returned. Default 24.
-        limit: Maximum number of articles to return (1-500). Default 200.
+        limit: Maximum number of articles to return (1-500). Default 50.
     """
     sources_map = await _load_sources()
 
@@ -600,7 +652,11 @@ async def news_feed(
         },
         "articles": all_articles,
     }
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    if _verbose:
+        _write_verbose_log(payload)
+
+    return _truncate_to_fit(payload)
 
 
 @mcp.tool()
@@ -636,6 +692,15 @@ async def news_feed_invalidate_cache() -> str:
 
 
 def main():
+    global _verbose
+    parser = argparse.ArgumentParser(description="MCP News Feeds server")
+    parser.add_argument("--verbose", action="store_true", help="Write fetched articles to log files")
+    args, remaining = parser.parse_known_args()
+    _verbose = args.verbose
+    if _verbose:
+        logging.basicConfig(level=logging.DEBUG)
+        logger.info("news_feed: verbose mode enabled, logs will be written to %s", _LOG_DIR)
+    sys.argv = [sys.argv[0], *remaining]
     mcp.run()
 
 

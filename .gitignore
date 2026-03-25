@@ -207,3 +207,7 @@ marimo/_lsp/
 __marimo__/
 
 .claude/
+.mcp.json
+.logs/
+logs/
+uv.lock
