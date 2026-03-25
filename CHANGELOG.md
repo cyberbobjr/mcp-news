@@ -1,6 +1,9 @@
 # Changelog
 
-## [1.1.0] - 2026-03-25
+## [1.1.1] - 2026-03-25
+
+### Bug Fixes
+- update repository URL in pyproject.toml (a351f55)
 
 ### Features
 - add feed health tracking and article fetch tools (ed865bd)
