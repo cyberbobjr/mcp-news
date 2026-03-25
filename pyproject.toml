@@ -27,7 +27,7 @@ dependencies = [
 mcp-news = "mcp_news.server:main"
 
 [project.urls]
-Repository = "https://github.com/benjaminmarchand/mcp-news"
+Repository = "https://github.com/cyberbobjr/mcp-news"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
