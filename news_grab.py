@@ -462,13 +462,13 @@ async def _fetch_all_feeds(
         results = await asyncio.gather(*tasks, return_exceptions=True)
         clean: List[Dict[str, Any]] = []
         for r in results:
-            if isinstance(r, Exception):
+            if isinstance(r, BaseException):
                 clean.append({
                     "source": "unknown", "country": "", "url": "",
                     "articles": [], "error": str(r),
                 })
             else:
-                clean.append(r)
+                clean.append(r)  # type: ignore[arg-type]
         return clean
 
 
