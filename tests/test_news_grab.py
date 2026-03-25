@@ -5,7 +5,7 @@ from __future__ import annotations
 import textwrap
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
-import news_grab
+from mcp_news import server as news_grab
 
 
 # ---------------------------------------------------------------------------

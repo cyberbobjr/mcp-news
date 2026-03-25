@@ -2,28 +2,44 @@
 
 An MCP server that collects articles from over 1100 RSS feeds distributed across 150+ countries, sourced from the community registry [news-feed-list-of-countries](https://github.com/cyberbobjr/news-feed-list-of-countries).
 
-## Installation
+## Quick Start (uvx)
 
-### 1. Create a Virtual Environment
+No installation needed — just configure your MCP client:
 
-```bash
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+```json
+{
+  "mcpServers": {
+    "news-feeds": {
+      "command": "uvx",
+      "args": ["mcp-news"]
+    }
+  }
+}
 ```
 
-### 2. Install Dependencies
+`uvx` will automatically download and run the server.
+
+## Installation from source
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/benjaminmarchand/mcp-news.git
+cd mcp-news
+pip install -e .
+```
+
+Then configure your MCP client:
+
+```json
+{
+  "mcpServers": {
+    "news-feeds": {
+      "command": "mcp-news"
+    }
+  }
+}
 ```
 
 ## Usage
-
-### Starting the MCP Server
-
-```bash
-python news_grab.py
-```
 
 The server runs on `stdio` and exposes 3 tools:
 
@@ -32,23 +48,6 @@ The server runs on `stdio` and exposes 3 tools:
 | `news_feed` | Retrieves recent articles, filterable by country, time window, and limit |
 | `news_feed_countries` | Lists all available countries with the number of feeds per country |
 | `news_feed_invalidate_cache` | Clears the registry cache to force a reload |
-
-### Configuration with Claude Desktop
-
-Add to `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "news-feeds": {
-      "command": "/path/to/venv/bin/python",
-      "args": ["/path/to/news_grab.py"]
-    }
-  }
-}
-```
-
-Replace `/path/to/venv` with your actual venv directory path. On Windows, use: `C:\\path\\to\\venv\\Scripts\\python.exe`
 
 ### Example Calls
 
@@ -73,7 +72,7 @@ Replace `/path/to/venv` with your actual venv directory path. On Windows, use: `
 
 ## Cache
 
-The RSS feed registry is cached in the `.cache/` directory next to the script. The cache is valid for 24 hours and refreshes automatically when the GitHub registry is updated.
+The RSS feed registry is cached locally. The cache is valid for 24 hours and refreshes automatically when the remote registry changes (SHA-1 comparison).
 
 To force a refresh:
 
@@ -84,7 +83,7 @@ export NEWS_FEED_BYPASS_CACHE=true
 ## Testing
 
 ```bash
-pip install pytest
+pip install -e ".[dev]"
 pytest tests/
 ```
 
@@ -92,5 +91,5 @@ pytest tests/
 
 | Variable | Description |
 |----------|-------------|
+| `NEWS_FEEDS_JSON_URL` | Override the feeds registry URL (default: raw GitHub URL from `cyberbobjr/news-feed-list-of-countries`) |
 | `NEWS_FEED_BYPASS_CACHE` | Set to `true` to ignore cache and always re-download the registry |
-| `GITHUB_TOKEN` | Optional GitHub token to avoid rate-limiting on the API |

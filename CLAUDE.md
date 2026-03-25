@@ -10,26 +10,21 @@ A news feed collection tool ("Hermes") that fetches articles from 1100+ RSS feed
 
 ## Architecture
 
-Single-file tool (`news_grab.py`) with these layers:
+Single-file tool (`server.py`) with these layers:
 
-1. **Registry loading** — Three-tier cache: in-memory → disk (`~/.hermes/cache/`) → remote GitHub fetch. Uses GitHub Contents API SHA to detect upstream changes before TTL expires.
+1. **Registry loading** — Three-tier cache: in-memory → disk (`.cache/`) → remote fetch. Computes SHA-1 of the downloaded JSON to detect upstream changes.
 2. **Country resolution** — Accepts ISO 3166-1 alpha-3 codes, English names, French aliases, and fuzzy prefix matching. Maps through `_ISO3_TO_NAME` / `_NAME_TO_ISO3` dicts.
 3. **RSS parsing** — Stdlib `xml.etree.ElementTree`, handles both RSS 2.0 (`<item>`) and Atom (`<entry>`) feeds. No external XML dependency.
 4. **Concurrent fetching** — `httpx.AsyncClient` with semaphore-bounded concurrency (12 max). Each feed has a 15s timeout.
 5. **Post-processing** — Time-window filtering, URL-based deduplication, recency sort.
-6. **Registration** — Registers as `news_feed` tool in the `web` toolset via `tools.registry.registry`.
+6. **Registration** — Registers as MCP tool via `FastMCP`.
 
 ## Dependencies
 
 - `httpx` — async HTTP client (only external runtime dependency)
-- `tools.registry` — internal tool registry (imported as `from tools.registry import registry`)
+- `mcp` — Model Context Protocol SDK
 
 ## Environment Variables
 
-- `HERMES_CACHE_DIR` — override cache directory (default: `~/.hermes/cache/`)
-- `HERMES_NEWS_FEED_BYPASS_CACHE` — set to `1`/`true` to skip cache
-- `GITHUB_TOKEN` — optional, used for GitHub API calls to avoid rate limits
-
-## Known Issues
-
-- `_write_cache_meta` and `_read_cache_meta` and `_fetch_remote_registry_sha` are each defined twice (duplicate function definitions at lines 193-211 and 240-258, and lines 214-227 and 261-274)
+- `NEWS_FEEDS_JSON_URL` — override the feeds registry URL (default: raw GitHub URL from `cyberbobjr/news-feed-list-of-countries`)
+- `NEWS_FEED_BYPASS_CACHE` — set to `1`/`true` to skip cache

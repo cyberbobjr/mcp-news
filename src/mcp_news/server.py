@@ -12,6 +12,7 @@ Classification, summarization, translation, and formatting are the agent's job.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -34,14 +35,14 @@ mcp = FastMCP("news-feeds")
 # Remote source registry (GitHub JSON) with local file cache
 # ---------------------------------------------------------------------------
 
-_FEEDS_JSON_URL = (
+_DEFAULT_FEEDS_JSON_URL = (
     "https://raw.githubusercontent.com/cyberbobjr/news-feed-list-of-countries"
     "/master/active-feeds-auto-generated.json"
 )
-_GITHUB_CONTENTS_API_URL = (
-    "https://api.github.com/repos/cyberbobjr/news-feed-list-of-countries"
-    "/contents/active-feeds-auto-generated.json?ref=master"
-)
+
+
+def _feeds_json_url() -> str:
+    return os.environ.get("NEWS_FEEDS_JSON_URL", "").strip() or _DEFAULT_FEEDS_JSON_URL
 
 _CACHE_DIR = Path(__file__).resolve().parent / ".cache"
 _CACHE_FILE = _CACHE_DIR / "news_feeds_registry.json"
@@ -207,26 +208,13 @@ def _read_cache_meta() -> Optional[Dict[str, Any]]:
         return None
 
 
-async def _fetch_remote_registry_sha() -> Optional[str]:
-    headers = {"User-Agent": "MCPNewsFeed/1.0"}
-    if os.environ.get("GITHUB_TOKEN"):
-        headers["Authorization"] = f"Bearer {os.environ['GITHUB_TOKEN']}"
-    async with httpx.AsyncClient(timeout=15.0, headers=headers) as client:
-        resp = await client.get(_GITHUB_CONTENTS_API_URL, follow_redirects=True)
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, dict):
-            sha = data.get("sha")
-            if isinstance(sha, str) and sha:
-                return sha
-    return None
-
-
-async def _fetch_registry_json() -> Dict[str, Any]:
+async def _fetch_registry_json() -> tuple[Dict[str, Any], str]:
+    """Fetch the registry JSON and return (parsed_data, sha1_hex)."""
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(_FEEDS_JSON_URL, follow_redirects=True)
+        resp = await client.get(_feeds_json_url(), follow_redirects=True)
         resp.raise_for_status()
-        return resp.json()
+        content_sha = hashlib.sha1(resp.content).hexdigest()
+        return resp.json(), content_sha
 
 
 def _normalize_registry(raw: Dict[str, Any]) -> Dict[str, List[Dict[str, str]]]:
@@ -250,48 +238,49 @@ async def _load_sources() -> Dict[str, List[Dict[str, str]]]:
     global _memory_cache, _memory_cache_ts, _memory_cache_remote_sha
 
     force_refresh = _force_refresh_enabled()
-    remote_sha: Optional[str] = None
-    if not force_refresh:
-        try:
-            remote_sha = await _fetch_remote_registry_sha()
-        except Exception as exc:
-            logger.debug("news_feed: remote sha fetch error: %s", exc)
 
-    # 1) Memory cache
+    # 1) Memory cache — valid if TTL hasn't expired and no force refresh
     if (
-        _memory_cache is not None
+        not force_refresh
+        and _memory_cache is not None
         and (time.time() - _memory_cache_ts) < _CACHE_TTL_SECONDS
-        and (force_refresh or remote_sha is None or _memory_cache_remote_sha == remote_sha)
     ):
         return _memory_cache
 
-    # 2) Disk cache
+    # 2) Disk cache — valid if TTL hasn't expired and no force refresh
     if (not force_refresh) and _cache_is_fresh():
+        raw = _read_cache()
+        if raw:
+            meta = _read_cache_meta()
+            cached_sha = meta.get("sha") if isinstance(meta, dict) else None
+            _memory_cache = _normalize_registry(raw)
+            _memory_cache_ts = time.time()
+            _memory_cache_remote_sha = cached_sha
+            logger.debug("news_feed: loaded %d countries from disk cache", len(_memory_cache))
+            return _memory_cache
+
+    # 3) Remote fetch — download, compute SHA, compare with cache
+    try:
+        raw, remote_sha = await _fetch_registry_json()
+
+        # If disk cache exists and SHA matches, no need to rewrite
         meta = _read_cache_meta()
         cached_sha = meta.get("sha") if isinstance(meta, dict) else None
-        if remote_sha is None or cached_sha == remote_sha:
-            raw = _read_cache()
-            if raw:
-                _memory_cache = _normalize_registry(raw)
+        if cached_sha == remote_sha and not force_refresh:
+            cached_raw = _read_cache()
+            if cached_raw:
+                _memory_cache = _normalize_registry(cached_raw)
                 _memory_cache_ts = time.time()
-                _memory_cache_remote_sha = cached_sha or remote_sha
-                logger.debug("news_feed: loaded %d countries from disk cache", len(_memory_cache))
+                _memory_cache_remote_sha = cached_sha
+                logger.debug("news_feed: remote unchanged (SHA match), using disk cache")
                 return _memory_cache
 
-    # 3) Remote fetch
-    try:
-        raw = await _fetch_registry_json()
         _write_cache(raw)
-        if remote_sha is None:
-            try:
-                remote_sha = await _fetch_remote_registry_sha()
-            except Exception:
-                remote_sha = None
         _write_cache_meta(remote_sha)
         _memory_cache = _normalize_registry(raw)
         _memory_cache_ts = time.time()
         _memory_cache_remote_sha = remote_sha
-        logger.info("news_feed: fetched %d countries from GitHub", len(_memory_cache))
+        logger.info("news_feed: fetched %d countries from remote", len(_memory_cache))
         return _memory_cache
     except Exception as exc:
         logger.error("news_feed: failed to fetch registry: %s", exc)
@@ -646,5 +635,9 @@ async def news_feed_invalidate_cache() -> str:
     return json.dumps({"success": True, "message": "Cache invalidated."})
 
 
-if __name__ == "__main__":
+def main():
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()
