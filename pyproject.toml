@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-news"
-version = "1.1.1"
+version = "1.1.2"
 description = "MCP server that collects articles from 1100+ RSS feeds across 150+ countries"
 readme = "README.md"
 license = "MIT"

@@ -464,6 +464,7 @@ def _parse_rss_xml(xml_bytes: bytes, source_meta: Dict[str, str]) -> List[Dict[s
 
 _DEFAULT_TIMEOUT = 15.0
 _MAX_CONCURRENCY = 12
+_FETCH_ALL_TIMEOUT = 45.0
 
 
 async def _fetch_single_feed(
@@ -631,7 +632,7 @@ def _truncate_to_fit(payload: Dict[str, Any], max_chars: int = _MAX_RESPONSE_CHA
 
 @mcp.tool()
 async def news_feed(
-    countries: Optional[list[str]] = None,
+    countries: list[str],
     hours: int = 24,
     limit: int = 50,
 ) -> str:
@@ -641,14 +642,27 @@ async def news_feed(
     Use this when the user asks for world news, breaking news, daily briefing,
     headlines, or any news-related query.
 
+    IMPORTANT: You MUST provide at least one country. Fetching all countries at once
+    is not supported. Use news_feed_countries to discover available countries first.
+
     Args:
         countries: Countries to fetch news for (names or ISO 3166-1 alpha-3 codes).
-            If omitted, all registered countries are used.
+            At least one country is required.
             Examples: ['France', 'USA', 'CHN'], ['FRA', 'GBR'].
         hours: Time window in hours (1-72). Only articles published within this
             window are returned. Default 24.
         limit: Maximum number of articles to return (1-500). Default 50.
     """
+    if not countries:
+        return json.dumps({
+            "success": False,
+            "error": (
+                "countries is required and must contain at least one entry. "
+                "Call news_feed_countries to list available countries, "
+                "then retry with a specific list (e.g. ['France', 'USA'])."
+            ),
+        }, ensure_ascii=False)
+
     sources_map = await _load_sources()
 
     if not sources_map:
@@ -658,28 +672,31 @@ async def news_feed(
         }, ensure_ascii=False)
 
     available_lower = {c.lower(): c for c in sources_map}
-    if countries:
-        resolved: List[str] = []
-        unresolved: List[str] = []
-        for c in countries:
-            iso3 = _resolve_country_code(c)
-            if iso3:
-                name = _ISO3_TO_NAME.get(iso3, iso3)
-                if name in sources_map:
-                    if name not in resolved:
-                        resolved.append(name)
-                    continue
-            canonical = available_lower.get(c.strip().lower())
-            if canonical:
-                if canonical not in resolved:
-                    resolved.append(canonical)
-            else:
-                unresolved.append(c.strip())
-    else:
-        resolved = sorted(sources_map.keys())
-        unresolved = []
+    resolved: List[str] = []
+    unresolved: List[str] = []
+    for c in countries:
+        iso3 = _resolve_country_code(c)
+        if iso3:
+            name = _ISO3_TO_NAME.get(iso3, iso3)
+            if name in sources_map:
+                if name not in resolved:
+                    resolved.append(name)
+                continue
+        canonical = available_lower.get(c.strip().lower())
+        if canonical:
+            if canonical not in resolved:
+                resolved.append(canonical)
+        else:
+            unresolved.append(c.strip())
 
-    feed_results = await _fetch_all_feeds(resolved, sources_map)
+    try:
+        feed_results = await asyncio.wait_for(
+            _fetch_all_feeds(resolved, sources_map),
+            timeout=_FETCH_ALL_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        feed_results = []
+        logger.warning("news_feed: global fetch timeout after %.0fs", _FETCH_ALL_TIMEOUT)
     _update_health(feed_results)
 
     all_articles: List[Dict[str, Any]] = []
