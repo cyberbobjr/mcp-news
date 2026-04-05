@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.2] - 2026-04-04
+
+### Bug Fixes
+- `news_feed`: `countries` is now a required parameter — calling it without a country list caused stdio timeouts by attempting to fetch all 1100+ feeds simultaneously. An empty or missing `countries` now returns an actionable error guiding the LLM to call `news_feed_countries` first, then retry with a specific list.
+- Add a 45s global timeout (`_FETCH_ALL_TIMEOUT`) as a safety net for large country lists.
+
 ## [1.1.1] - 2026-03-25
 
 ### Bug Fixes
